@@ -1,12 +1,39 @@
 name: Stop AI Attribution
 description: >-
-  Fails a pull request when its title or body contains AI-attribution
-  strings (Claude / "generated with" / "co-authored-by" patterns).
-  Reusable across repos so the attribution policy lives in one place.
+  Fails a pull request when its title, body, branch name, or commit
+  messages contain AI-attribution strings (Claude / Copilot / ChatGPT /
+  Cursor / Gemini / Codex / "co-authored-by" / "generated with"
+  patterns). Reusable across repos so the attribution policy lives
+  in one place.
 
 branding:
   icon: shield
   color: purple
+
+inputs:
+  rejection-message:
+    description: >-
+      Message shown when AI attribution is detected. Printed after the
+      GitHub error annotation so consuming repos can explain their
+      policy or point to docs.
+    required: false
+    default: This repository does not include AI attribution in PRs.
+  extra-patterns:
+    description: >-
+      Newline-separated list of additional regex alternatives to match.
+      Each non-empty line is OR'd onto the built-in pattern
+      (case-insensitive, extended regex). Lets a consuming repo add
+      org-specific bot accounts or product names without replacing
+      the shared default.
+    required: false
+    default: ""
+  comment-on-failure:
+    description: >-
+      When true, post the rejection-message as a sticky PR comment in
+      addition to failing the check. Requires the workflow's
+      GITHUB_TOKEN to have `pull-requests: write` permission.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -16,15 +43,70 @@ runs:
       env:
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_BODY: ${{ github.event.pull_request.body }}
+        PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REJECTION_MESSAGE: ${{ inputs.rejection-message }}
+        EXTRA_PATTERNS: ${{ inputs.extra-patterns }}
+        COMMENT_ON_FAILURE: ${{ inputs.comment-on-failure }}
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
       run: |
         set -eu
-        echo "Checking PR title and body for AI attribution..."
+        echo "Checking PR for AI attribution..."
 
-        pattern='(claude\.com|@claude|co-authored-by.*claude|generated.*with.*claude|created.*with.*claude)'
+        base_pattern='(claude\.com|anthropic\.com|openai\.com|chatgpt\.com|chat\.openai\.com|cursor\.(sh|com)|codeium\.com|tabnine\.com|gemini\.google|@(claude|copilot|chatgpt|openai|cursor|gemini|codex)|co-authored-by.*(claude|copilot|chatgpt|openai|anthropic|cursor|gemini|codex|codeium|tabnine)|(generated|created|written|authored).*(with|by).*(claude|copilot|chatgpt|openai|anthropic|cursor|gemini|codex)|claude[- ]?code|github[- ]?copilot|noreply@(anthropic|openai)\.com)'
+
+        branch_pattern='(^|[/_-])(claude|copilot|chatgpt|openai|cursor|gemini|codex)([/_-]|$)'
+
+        pattern="$base_pattern"
+        if [ -n "${EXTRA_PATTERNS:-}" ]; then
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            pattern="${pattern}|(${line})"
+          done <<< "$EXTRA_PATTERNS"
+        fi
+
+        matched=""
 
         if printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | grep -iE "$pattern" > /dev/null 2>&1; then
-          echo "::error::AI attribution detected in PR title or body."
-          echo "This repository does not include AI attribution in PRs."
+          matched="PR title or body"
+        fi
+
+        if [ -z "$matched" ] && printf '%s\n' "$PR_BRANCH" | grep -iE "$branch_pattern|$pattern" > /dev/null 2>&1; then
+          matched="branch name ($PR_BRANCH)"
+        fi
+
+        if [ -z "$matched" ]; then
+          commit_messages="$(gh api "repos/${GH_REPO}/pulls/${PR_NUMBER}/commits" --paginate --jq '.[].commit.message')"
+          if printf '%s\n' "$commit_messages" | grep -iE "$pattern" > /dev/null 2>&1; then
+            matched="commit messages"
+          fi
+        fi
+
+        if [ -n "$matched" ]; then
+          echo "::error::AI attribution detected in $matched."
+          printf '%s\n' "$REJECTION_MESSAGE"
+
+          if [ "${COMMENT_ON_FAILURE,,}" = "true" ]; then
+            marker="<!-- stop-ai:auto -->"
+            comment_body="${marker}
+**AI attribution detected in ${matched}.**
+
+${REJECTION_MESSAGE}"
+
+            existing_id="$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" --paginate \
+              --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -n1)"
+
+            if [ -n "$existing_id" ]; then
+              gh api -X PATCH "repos/${GH_REPO}/issues/comments/${existing_id}" \
+                -f body="$comment_body" > /dev/null \
+                || echo "::warning::Failed to update existing PR comment (check pull-requests: write permission)."
+            else
+              gh pr comment "$PR_NUMBER" --body "$comment_body" \
+                || echo "::warning::Failed to post PR comment (check pull-requests: write permission)."
+            fi
+          fi
+
           exit 1
         fi
 
