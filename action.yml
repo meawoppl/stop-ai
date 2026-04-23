@@ -1,0 +1,31 @@
+name: Stop AI Attribution
+description: >-
+  Fails a pull request when its title or body contains AI-attribution
+  strings (Claude / "generated with" / "co-authored-by" patterns).
+  Reusable across repos so the attribution policy lives in one place.
+
+branding:
+  icon: shield
+  color: purple
+
+runs:
+  using: composite
+  steps:
+    - name: Check PR for AI attribution
+      shell: bash
+      env:
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_BODY: ${{ github.event.pull_request.body }}
+      run: |
+        set -eu
+        echo "Checking PR title and body for AI attribution..."
+
+        pattern='(claude\.com|@claude|co-authored-by.*claude|generated.*with.*claude|created.*with.*claude)'
+
+        if printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | grep -iE "$pattern" > /dev/null 2>&1; then
+          echo "::error::AI attribution detected in PR title or body."
+          echo "This repository does not include AI attribution in PRs."
+          exit 1
+        fi
+
+        echo "✅ No AI attribution found."
