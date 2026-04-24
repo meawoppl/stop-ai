@@ -89,10 +89,8 @@ runs:
 
           if [ "${COMMENT_ON_FAILURE,,}" = "true" ]; then
             marker="<!-- stop-ai:auto -->"
-            comment_body="${marker}
-**AI attribution detected in ${matched}.**
-
-${REJECTION_MESSAGE}"
+            printf -v comment_body '%s\n**AI attribution detected in %s.**\n\n%s' \
+              "$marker" "$matched" "$REJECTION_MESSAGE"
 
             existing_id="$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" --paginate \
               --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -n1)"
